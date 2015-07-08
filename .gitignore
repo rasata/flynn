@@ -6,6 +6,6 @@ bin
 /log
 script/custom-vagrant
 demo/*.log
-util/_toolchain/**
+util/_toolchain/go
 *.swp
 *.test
