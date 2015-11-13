@@ -1,6 +1,7 @@
 import Router from 'marbles/router';
 import { extend } from 'marbles/utils';
 import Config from '../config';
+import BackupComponent from '../views/backup';
 import LoginModel from '../views/models/login';
 import LoginComponent from '../views/login';
 import InstallCertComponent from '../views/install-cert';
@@ -10,6 +11,7 @@ var MainRouter = Router.createClass({
 
 	routes: [
 		{ path: "", handler: "root" },
+		{ path: "backup", handler: "backup" },
 		{ path: "login", handler: "login", auth: false },
 		{ path: "installcert", handler: "installCert", auth: false }
 	],
@@ -20,6 +22,12 @@ var MainRouter = Router.createClass({
 			replace: true,
 			params: params
 		});
+	},
+
+	backup: function () {
+		var props = {};
+		this.context.primaryView = React.render(React.createElement(
+			BackupComponent, props), this.context.el);
 	},
 
 	login: function (params) {
