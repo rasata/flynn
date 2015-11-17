@@ -2,6 +2,7 @@ import Config from '../config';
 import InstallSteps from './install-steps';
 import CloudSelector from './cloud-selector';
 import CredentialsPicker from './credentials-picker';
+import BackupSelector from './backup-selector';
 import RouteLink from './route-link';
 import AWSLauncher from './aws-launcher';
 import DigitalOceanLauncher from './digital-ocean-launcher';
@@ -52,6 +53,10 @@ var Wizard = React.createClass({
 							) : (
 								<RouteLink path={'/credentials?cloud='+ state.selectedCloud} style={BtnCSS}>Add credentials to continue</RouteLink>
 							)) : null}
+
+						{state.currentStep === 'configure' && state.credentialID ? (
+							<BackupSelector state={state} />
+						) : null}
 
 						{state.currentStep === 'configure' && state.selectedCloud === 'aws' && state.credentialID ? (
 							<AWSLauncher state={state} />
@@ -112,7 +117,9 @@ var Wizard = React.createClass({
 							case 'file':
 								return (
 									<form onSubmit={function(e){e.preventDefault();}}>
-										<FileInput onChange={this.__handlePromptFileSelected} />
+										<FileInput onChange={this.__handlePromptFileSelected} style={{
+											marginBottom: '1em'
+										}} />
 									</form>
 								);
 							case 'choice':

@@ -36,6 +36,7 @@ var BaseCluster = createClass({
 			regions: [],
 			numInstances: 1,
 			credentials: [],
+			backup: null,
 			__allCredentials: []
 		};
 	},
@@ -68,6 +69,8 @@ var BaseCluster = createClass({
 			selectedRegion: null,
 
 			prompt: prevState.prompt,
+
+			backup: attrs.backup || prevState.backup || null,
 
 			errorMessage: attrs.hasOwnProperty('errorMessage') ? attrs.errorMessage : prevState.errorMessage,
 
@@ -262,6 +265,16 @@ var BaseCluster = createClass({
 				num_instances: event.numInstances
 			}));
 			break;
+
+		case 'SELECT_BACKUP':
+			var reader = new FileReader();
+			reader.onload = function () {
+				this.setState(this.__computeState({
+					backup: btoa(reader.result)
+				}));
+			}.bind(this);
+			reader.readAsBinaryString(event.file);
+			break;
 		}
 	},
 
@@ -278,6 +291,7 @@ BaseCluster.prototype.setState = function (newState, shouldDelay) {
 	this.attrs.credentialID = newState.credentialID;
 	this.attrs.numInstances = newState.numInstances;
 	this.attrs.region = newState.selectedRegionSlug;
+	this.attrs.backup = newState.backup;
 
 	if (shouldDelay) {
 		State.setStateWithDelay.call(this, newState, 25);
@@ -298,7 +312,8 @@ BaseCluster.jsonFields = {
 	dashboard_login_token: 'dashboardLoginToken',
 	domain: 'domain',
 	ca_cert: 'caCert',
-	credential_id: 'credentialID'
+	credential_id: 'credentialID',
+	backup: 'backup'
 };
 
 var clusterTypes = {};

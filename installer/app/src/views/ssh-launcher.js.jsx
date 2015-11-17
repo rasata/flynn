@@ -1,5 +1,6 @@
 import { extend } from 'marbles/utils';
 import Dispatcher from '../dispatcher';
+import BackupSelector from './backup-selector';
 import IntegerPicker from './integer-picker';
 import { green as GreenBtnCSS, disabled as DisabledBtnCSS } from './css/button';
 import Sheet from './css/sheet';
@@ -64,6 +65,8 @@ var InstallConfig = React.createClass({
 						<li>443 (HTTPS)</li>
 						<li>3000 to 3500 (user-defined TCP services, optional)</li>
 				</ul>
+
+				<BackupSelector state={this.props.state} />
 
 				<label>
 					<span>Number of instances:</span>

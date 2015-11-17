@@ -374,6 +374,15 @@ func (c *BaseCluster) bootstrapTarget(t *TargetServer) error {
 		}
 	}
 
+	backupPath := "/tmp/flynn-backup.tar"
+	if c.Backup != "" {
+		c.SendLog(fmt.Sprintf("Uploading backup to %s", t.IP))
+		cmd := fmt.Sprintf(`echo "%s" | base64 -d > %s`, c.Backup, backupPath)
+		if err := c.instanceRunCmdWithClient(cmd, t.SSHClient, t.User, t.IP); err != nil {
+			return err
+		}
+	}
+
 	sess, err := t.SSHClient.NewSession()
 	if err != nil {
 		return err
@@ -383,7 +392,11 @@ func (c *BaseCluster) bootstrapTarget(t *TargetServer) error {
 		return err
 	}
 	sess.Stderr = os.Stderr
-	if err := sess.Start(fmt.Sprintf("CLUSTER_DOMAIN=%s flynn-host bootstrap --min-hosts=%d --discovery=%s --json", c.Domain.Name, c.NumInstances, c.DiscoveryToken)); err != nil {
+	cmd := fmt.Sprintf("CLUSTER_DOMAIN=%s flynn-host bootstrap --min-hosts=%d --discovery=%s --json", c.Domain.Name, c.NumInstances, c.DiscoveryToken)
+	if c.Backup != "" {
+		cmd = fmt.Sprintf("%s --from-backup=%s", cmd, backupPath)
+	}
+	if err := sess.Start(cmd); err != nil {
 		c.uploadDebugInfo(t)
 		return err
 	}

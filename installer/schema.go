@@ -131,6 +131,7 @@ type BaseCluster struct {
 	SSHKey              *sshkeygen.SSHKey `json:"-" ql:"-"`
 	SSHKeyName          string            `json:"ssh_key_name,omitempty"`
 	SSHUsername         string            `json:"-" ql:"-"`
+	Backup              string            `json:"backup" ql"-"`
 	DiscoveryToken      string            `json:"discovery_token"`
 	InstanceIPs         []string          `json:"instance_ips,omitempty" ql:"-"`
 	DeletedAt           *time.Time        `json:"deleted_at,omitempty"`

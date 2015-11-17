@@ -18,7 +18,6 @@ var InstallConfig = React.createClass({
 			<form onSubmit={this.__handleSubmit}>
 				<div>
 					<br />
-					<br />
 					<AWSRegionPicker
 						value={clusterState.selectedRegionSlug}
 						onChange={this.__handleRegionChange} />
