@@ -7,6 +7,7 @@ import (
 type Migration struct {
 	ID    int
 	Stmts []string
+	UseTx bool
 }
 
 func NewMigrations() *Migrations {
@@ -17,7 +18,11 @@ func NewMigrations() *Migrations {
 type Migrations []Migration
 
 func (m *Migrations) Add(id int, stmts ...string) {
-	*m = append(*m, Migration{ID: id, Stmts: stmts})
+	*m = append(*m, Migration{ID: id, Stmts: stmts, UseTx: true})
+}
+
+func (m *Migrations) AddNoTx(id int, stmts ...string) {
+	*m = append(*m, Migration{ID: id, Stmts: stmts, UseTx: false})
 }
 
 func (m Migrations) Migrate(db *DB) error {
@@ -47,7 +52,11 @@ func (m Migrations) Migrate(db *DB) error {
 		}
 
 		for _, s := range migration.Stmts {
-			err = tx.Exec(s)
+			if migration.UseTx {
+				err = tx.Exec(s)
+			} else {
+				err = db.Exec(s)
+			}
 			if err != nil {
 				tx.Rollback()
 				return err
