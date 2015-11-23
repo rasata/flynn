@@ -97,7 +97,7 @@ main() {
 
   info "bootstrapping Flynn"
   export CLUSTER_DOMAIN="${domain}"
-  export DISCOVERD="${ips[0]}:1111"
+  export DISCOVERD="$(join "," ${ips[@]})"
   "${host_dir}/bin/flynn-host" \
     bootstrap \
     --min-hosts="${size}" \

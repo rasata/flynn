@@ -1,266 +1,205 @@
 package discoverd
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	dt "github.com/flynn/flynn/discoverd/types"
 	"github.com/flynn/flynn/pkg/dialer"
 	"github.com/flynn/flynn/pkg/httpclient"
-	hh "github.com/flynn/flynn/pkg/httphelper"
 	"github.com/flynn/flynn/pkg/stream"
 )
 
-type Service interface {
-	Leader() (*Instance, error)
-	Instances() ([]*Instance, error)
-	Addrs() ([]string, error)
-	Leaders(chan *Instance) (stream.Stream, error)
-	Watch(events chan *Event) (stream.Stream, error)
-	GetMeta() (*ServiceMeta, error)
-	SetMeta(*ServiceMeta) error
-	SetLeader(string) error
-}
-
 var ErrTimedOut = errors.New("discoverd: timed out waiting for instances")
+var PinTTL = 60 * time.Second
+
+type Config struct {
+	Endpoints []string
+}
 
 type Client struct {
-	c *httpclient.Client
+	servers    []*httpclient.Client
+	pinned     int
+	pinUpdated time.Time
+	leader     int
+	mu         sync.RWMutex
 }
 
-func NewClient() *Client {
-	url := os.Getenv("DISCOVERD")
-	if url == "" {
-		url = "http://127.0.0.1:1111"
+func NewClientWithConfig(config Config) *Client {
+	client := &Client{
+		servers: make([]*httpclient.Client, 0, len(config.Endpoints)),
 	}
-	return NewClientWithURL(url)
+	for _, e := range config.Endpoints {
+		client.servers = append(client.servers, client.httpClient(e))
+	}
+	return client
 }
 
 func NewClientWithURL(url string) *Client {
-	if !strings.HasPrefix(url, "http") {
-		url = "http://" + url
+	return NewClientWithConfig(Config{Endpoints: formatURLs([]string{url})})
+}
+
+func NewClient() *Client {
+	return NewClientWithConfig(defaultConfig())
+}
+
+func defaultConfig() Config {
+	urls := os.Getenv("DISCOVERD")
+	if urls == "" || urls == "none" {
+		urls = "http://127.0.0.1:1111"
 	}
-	return &Client{
-		c: &httpclient.Client{
-			URL: url,
-			HTTP: &http.Client{
-				Transport:     &http.Transport{Dial: dialer.Retry.Dial},
-				CheckRedirect: redirectPreserveHeaders,
-			},
-		},
+	return Config{Endpoints: formatURLs(strings.Split(urls, ","))}
+}
+
+func formatURLs(urls []string) []string {
+	formatted := make([]string, 0, len(urls))
+	for _, u := range urls {
+		if !strings.HasPrefix(u, "http") {
+			u = "http://" + u
+		}
+		formatted = append(formatted, u)
+	}
+	return formatted
+}
+
+func (c *Client) updateLeader(host string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, s := range c.servers {
+		if s.Host == host {
+			c.leader = i
+		}
 	}
 }
 
-func NewClientWithHTTP(url string, hc *http.Client) *Client {
-	if url == "" {
-		url = "http://127.0.0.1:1111"
-	}
-	return &Client{
-		c: &httpclient.Client{
-			URL:  url,
-			HTTP: hc,
-		},
-	}
-}
-
-func redirectPreserveHeaders(req *http.Request, via []*http.Request) error {
-	if len(via) >= 10 {
-		return fmt.Errorf("too many redirects")
-	}
-	if len(via) == 0 {
+func (c *Client) httpClient(url string) *httpclient.Client {
+	checkRedirect := func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("too many redirects")
+		}
+		if len(via) > 0 {
+			for attr, val := range via[0].Header {
+				if _, ok := req.Header[attr]; !ok {
+					req.Header[attr] = val
+				}
+			}
+		}
+		c.updateLeader(req.Host)
 		return nil
 	}
-	for attr, val := range via[0].Header {
-		if _, ok := req.Header[attr]; !ok {
-			req.Header[attr] = val
+	return &httpclient.Client{
+		URL: url,
+		HTTP: &http.Client{
+			Transport:     &http.Transport{Dial: dialer.Retry.Dial},
+			CheckRedirect: checkRedirect,
+		},
+	}
+}
+
+func (c *Client) Do(method string, path string, in, out interface{}, streamReq bool) (res stream.Stream, err error) {
+	var leaderReq bool
+	switch method {
+	case "PUT", "DEL", "POST":
+		leaderReq = true
+	}
+
+	c.mu.RLock()
+	leader := c.leader
+	pinned := c.pinned
+	pinUpdated := c.pinUpdated
+	c.mu.RUnlock()
+
+	// try direct writes directly to the leader to avoid redirect
+	if leaderReq {
+		pinned = leader
+	}
+
+	errors := make([]string, 0, len(c.servers))
+	for i := pinned; i < len(c.servers)+pinned; i++ {
+		k := i % len(c.servers)
+		hc := c.servers[k]
+		if streamReq {
+			res, err = hc.Stream(method, path, in, out)
+		} else {
+			err = hc.Send(method, path, in, out)
+		}
+		if isNetError(err) {
+			errors = append(errors, err.Error())
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+		if time.Since(pinUpdated) > PinTTL {
+			k = 0 // TTL has timed out, use preffered server on next request
+		}
+		if k != pinned && !leaderReq { // don't update the pin on leader requests
+			c.mu.Lock()
+			c.pinned = k
+			if pinned == 0 {
+				// Only restart the TTL if the preferred server was pinned but failed
+				c.pinUpdated = time.Now()
+			}
+			c.mu.Unlock()
+		}
+		return res, nil
+	}
+	return nil, fmt.Errorf("Error sending HTTP request, errors:", strings.Join(errors, ","))
+}
+
+func isNetError(err error) bool {
+	switch err.(type) {
+	case *net.OpError:
+		return true
+	}
+	return false
+}
+
+func (c *Client) Stream(method string, path string, in, out interface{}) (stream.Stream, error) {
+	return c.Do(method, path, in, out, true)
+}
+
+func (c *Client) Send(method string, path string, in, out interface{}) error {
+	_, err := c.Do(method, path, in, out, false)
+	return err
+}
+
+func (c *Client) Get(path string, out interface{}) error {
+	return c.Send("GET", path, nil, out)
+}
+
+func (c *Client) Put(path string, in, out interface{}) error {
+	return c.Send("PUT", path, in, out)
+}
+
+func (c *Client) Delete(path string) error {
+	return c.Send("DELETE", path, nil, nil)
+}
+
+func (c *Client) Ping(url string) error {
+	if s := c.serverByHost(url); s != nil {
+		return s.Get("/ping", nil)
+	}
+	return fmt.Errorf("discoverd server not found in server list")
+}
+
+func (c *Client) Shutdown(url string) (res dt.ShutdownInfo, err error) {
+	if s := c.serverByHost(url); s != nil {
+		return res, s.Post("/shutdown", nil, &res)
+	}
+	return nil, fmt.Errorf("discoverd server not found in server list")
+}
+
+func (c *Client) serverByHost(url string) *httpclient.Client {
+	for _, s := range c.servers {
+		if s.URL == url {
+			return s
 		}
 	}
 	return nil
-}
-
-func (c *Client) Ping() error {
-	return c.c.Get("/ping", nil)
-}
-
-type LeaderType string
-
-const (
-	LeaderTypeManual LeaderType = "manual"
-	LeaderTypeOldest LeaderType = "oldest"
-)
-
-type ServiceConfig struct {
-	LeaderType LeaderType `json:"leader_type"`
-}
-
-func (c *Client) AddService(name string, conf *ServiceConfig) error {
-	if conf == nil {
-		conf = &ServiceConfig{}
-	}
-	if conf.LeaderType == "" {
-		conf.LeaderType = LeaderTypeOldest
-	}
-	return c.c.Put("/services/"+name, conf, nil)
-}
-
-func (c *Client) RemoveService(name string) error {
-	return c.c.Delete("/services/" + name)
-}
-
-func (c *Client) Service(name string) Service {
-	return newService(c, name)
-}
-
-func IsNotFound(err error) bool {
-	return hh.IsObjectNotFoundError(err)
-}
-
-func (c *Client) Instances(service string, timeout time.Duration) ([]*Instance, error) {
-	s := c.Service(service)
-	instances, err := s.Instances()
-	if len(instances) > 0 || err != nil && !IsNotFound(err) {
-		return instances, err
-	}
-
-	events := make(chan *Event)
-	stream, err := s.Watch(events)
-	if err != nil {
-		return nil, err
-	}
-	defer stream.Close()
-	// get any current instances
-outer:
-	for event := range events {
-		switch event.Kind {
-		case EventKindCurrent:
-			break outer
-		case EventKindUp:
-			instances = append(instances, event.Instance)
-		}
-	}
-	if len(instances) > 0 {
-		return instances, nil
-	}
-	// wait for an instance to come up
-	for {
-		select {
-		case event, ok := <-events:
-			if !ok {
-				return nil, stream.Err()
-			}
-			if event.Kind != EventKindUp {
-				continue
-			}
-			return []*Instance{event.Instance}, nil
-		case <-time.After(timeout):
-			return nil, ErrTimedOut
-		}
-	}
-}
-
-func (c *Client) Shutdown() (res dt.ShutdownInfo, err error) {
-	return res, c.c.Post("/shutdown", nil, &res)
-}
-
-type service struct {
-	client *Client
-	name   string
-}
-
-func newService(client *Client, name string) Service {
-	return &service{
-		client: client,
-		name:   name,
-	}
-}
-
-func (s *service) Leader() (*Instance, error) {
-	res := &Instance{}
-	return res, s.client.c.Get(fmt.Sprintf("/services/%s/leader", s.name), res)
-}
-
-func (s *service) Instances() ([]*Instance, error) {
-	var res []*Instance
-	return res, s.client.c.Get(fmt.Sprintf("/services/%s/instances", s.name), &res)
-}
-
-func (s *service) Addrs() ([]string, error) {
-	instances, err := s.Instances()
-	if err != nil {
-		return nil, err
-	}
-	addrs := make([]string, len(instances))
-	for i, inst := range instances {
-		addrs[i] = inst.Addr
-	}
-	return addrs, nil
-}
-
-// Leaders sends leader events to the given channel (sending nil when there is
-// no leader, for example if there are no instances currently registered).
-func (s *service) Leaders(leaders chan *Instance) (stream.Stream, error) {
-	events := make(chan *Event)
-	eventStream, err := s.client.c.Stream("GET", fmt.Sprintf("/services/%s/leader", s.name), nil, events)
-	if err != nil {
-		return nil, err
-	}
-	stream := stream.New()
-	go func() {
-		defer func() {
-			eventStream.Close()
-			// wait for stream to close to prevent race with Err read
-			for range events {
-			}
-			if err := eventStream.Err(); err != nil {
-				stream.Error = err
-			}
-			close(leaders)
-		}()
-		for {
-			select {
-			case event, ok := <-events:
-				if !ok {
-					return
-				}
-				if event.Kind != EventKindLeader {
-					continue
-				}
-				select {
-				case leaders <- event.Instance:
-				case <-stream.StopCh:
-					return
-				}
-			case <-stream.StopCh:
-				return
-			}
-		}
-	}()
-	return stream, nil
-}
-
-type ServiceMeta struct {
-	Data json.RawMessage `json:"data"`
-
-	// When calling SetMeta, Index is checked against the current index and the
-	// set only succeeds if the index is the same. A zero index means the meta
-	// does not currently exist.
-	Index uint64 `json:"index"`
-}
-
-func (s *service) GetMeta() (*ServiceMeta, error) {
-	meta := &ServiceMeta{}
-	return meta, s.client.c.Get(fmt.Sprintf("/services/%s/meta", s.name), meta)
-}
-
-func (s *service) SetMeta(m *ServiceMeta) error {
-	return s.client.c.Put(fmt.Sprintf("/services/%s/meta", s.name), m, m)
-}
-
-func (s *service) SetLeader(id string) error {
-	return s.client.c.Put(fmt.Sprintf("/services/%s/leader", s.name), &Instance{ID: id}, nil)
 }

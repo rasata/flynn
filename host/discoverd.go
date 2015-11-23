@@ -78,6 +78,7 @@ func (d *DiscoverdManager) ConnectLocal(url string) error {
 	}
 	d.local.Store(true)
 
+	fmt.Println("Setting default env var DISCOVERD=", url)
 	d.backend.SetDefaultEnv("DISCOVERD", url)
 
 	go func() {
