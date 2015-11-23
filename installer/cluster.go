@@ -206,7 +206,6 @@ func (c *BaseCluster) instanceRunCmd(cmd string, sshConfig *ssh.ClientConfig, ip
 }
 
 func (c *BaseCluster) instanceRunCmdWithClient(cmd string, sshConn *ssh.Client, user, ipAddress string) error {
-	c.SendLog(fmt.Sprintf("Running `%s` on %s", cmd, ipAddress))
 	sudoPrompt := "<SUDO_PROMPT>"
 	cmd = strings.Replace(cmd, "sudo ", fmt.Sprintf("sudo -S --prompt='%s\n' ", sudoPrompt), -1)
 
