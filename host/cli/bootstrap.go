@@ -316,6 +316,23 @@ WHERE release_id = (SELECT release_id FROM apps WHERE name = 'discoverd')
 	}
 	ch <- &bootstrap.StepInfo{StepMeta: meta, State: "done", Timestamp: time.Now().UTC()}
 
+	// wait for dashboard
+	meta = bootstrap.StepMeta{ID: "dashboard-wait", Action: "wait"}
+	ch <- &bootstrap.StepInfo{StepMeta: meta, State: "start", Timestamp: time.Now().UTC()}
+	if err := (&bootstrap.WaitAction{
+		URL: "http://dashboard-web.discoverd/ping",
+	}).Run(state); err != nil {
+		ch <- &bootstrap.StepInfo{
+			StepMeta:  meta,
+			State:     "error",
+			Error:     err.Error(),
+			Err:       err,
+			Timestamp: time.Now().UTC(),
+		}
+		return err
+	}
+	ch <- &bootstrap.StepInfo{StepMeta: meta, State: "done", Timestamp: time.Now().UTC()}
+
 	return nil
 }
 
