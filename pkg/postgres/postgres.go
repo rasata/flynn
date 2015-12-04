@@ -18,6 +18,7 @@ const (
 	InvalidTextRepresentation = "22P02"
 	CheckViolation            = "23514"
 	UniqueViolation           = "23505"
+	FeatureNotSupported       = "0A000"
 )
 
 type Conf struct {
@@ -89,6 +90,13 @@ func Wait(conf *Conf, afterConn func(*pgx.Conn) error) *DB {
 	}
 }
 
+func handleSessionErrors(conn *pgx.Conn, err error) {
+	// if cached plan error then close conn
+	if e, ok := err.(pgx.PgError); ok && e.Code == FeatureNotSupported && e.Message == "cached plan must not change result type" {
+		conn.Close()
+	}
+}
+
 func Open(conf *Conf, afterConn func(*pgx.Conn) error) (*DB, error) {
 	connConfig := pgx.ConnConfig{
 		Host:     fmt.Sprintf("leader.%s.discoverd", conf.Service),
@@ -96,6 +104,7 @@ func Open(conf *Conf, afterConn func(*pgx.Conn) error) (*DB, error) {
 		Database: conf.Database,
 		Password: conf.Password,
 		Dial:     dialer.Retry.Dial,
+		OnError:  handleSessionErrors,
 	}
 	connPool, err := pgx.NewConnPool(pgx.ConnPoolConfig{
 		ConnConfig:     connConfig,

@@ -35,6 +35,7 @@ type ConnConfig struct {
 	FallbackTLSConfig *tls.Config // config for fallback TLS connection (only used if UseFallBackTLS is true)-- nil disables TLS
 	Logger            Logger
 	Dial              DialFunc
+	OnError           func(*Conn, error) // function to run on error
 }
 
 // Conn is a PostgreSQL connection handle. It is not safe for concurrent usage.
@@ -865,6 +866,7 @@ func (c *Conn) Exec(sql string, arguments ...interface{}) (commandTag CommandTag
 	}
 
 	if err = c.sendQuery(sql, arguments...); err != nil {
+		c.runOnError(err)
 		return
 	}
 
@@ -1098,6 +1100,12 @@ func (c *Conn) txPasswordMessage(password string) (err error) {
 	_, err = c.conn.Write(wbuf.buf)
 
 	return err
+}
+
+func (c *Conn) runOnError(err error) {
+	if c.config.OnError != nil {
+		c.config.OnError(c, err)
+	}
 }
 
 func (c *Conn) die(err error) {
