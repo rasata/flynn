@@ -335,7 +335,7 @@ func (e *generator) runJob() {
 	}
 	job, err := e.client.RunJobDetached(e.resourceIds["app"], new_job)
 	if err == nil {
-		e.resourceIds["job"] = job.ID
+		e.resourceIds["job"] = job.UUID
 	}
 }
 
@@ -345,7 +345,7 @@ func (e *generator) listJobs() {
 
 func (e *generator) updateJob() {
 	job := &ct.Job{
-		ID:        e.resourceIds["job"],
+		UUID:      e.resourceIds["job"],
 		AppID:     e.resourceIds["app"],
 		ReleaseID: e.resourceIds["release"],
 		State:     "down",

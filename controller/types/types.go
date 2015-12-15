@@ -90,6 +90,8 @@ type Key struct {
 
 type Job struct {
 	ID         string            `json:"id,omitempty"`
+	UUID       string            `json:"uuid,omitempty"`
+	HostID     string            `json:"host_id,omitempty"`
 	AppID      string            `json:"app,omitempty"`
 	ReleaseID  string            `json:"release,omitempty"`
 	Type       string            `json:"type,omitempty"`
