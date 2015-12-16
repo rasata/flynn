@@ -61,8 +61,8 @@
       "processes": {
         "app": {
           "ports": [{"port": 5002, "proto": "tcp"}],
-          "resurrect": true,
           "host_network": true,
+          "resurrect": true,
           "omni": true
         }
       }
@@ -106,8 +106,7 @@
           "service": "postgres",
           "env": {
             "SINGLETON": "{{ .Singleton }}"
-          },
-          "resurrect": true
+          }
         },
         "web": {
           "ports": [{"port": 80, "proto": "tcp"}],
@@ -180,16 +179,14 @@
       "processes": {
         "web": {
           "ports": [{"port": 80, "proto": "tcp"}],
-          "cmd": ["controller"],
           "service": "controller",
-          "resurrect": true
+          "cmd": ["controller"]
         },
         "scheduler": {
           "cmd": ["scheduler"],
           "omni": true,
           "service": "controller-scheduler",
-          "ports": [{ "proto": "tcp" }],
-          "resurrect": true
+          "ports": [{ "proto": "tcp" }]
         },
         "worker": {
           "cmd": ["worker"],

@@ -445,11 +445,7 @@ func runDaemon(args *docopt.Args) {
 		}
 		log.Info("got cluster peer IPs", "peers", peerIPs)
 	}
-	log.Info("connecting to cluster peers")
-	if err := discoverdManager.ConnectPeer(peerIPs); err != nil && !args.Bool["--no-resurrect"] {
-		log.Info("no cluster peers available, resurrecting jobs")
-		resurrect()
-	}
+	resurrect()
 
 	log.Info("blocking main goroutine")
 	<-make(chan struct{})
