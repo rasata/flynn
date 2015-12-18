@@ -57,14 +57,14 @@ func ServeHTTP() error {
 		logger:    logger,
 		clientConfig: installerJSConfig{
 			Endpoints: map[string]string{
-				"clusters":           "/clusters",
-				"cluster":            "/clusters/:id",
-				"cert":               "/clusters/:id/ca-cert",
-				"events":             "/events",
-				"prompt":             "/clusters/:id/prompts/:prompt_id",
-				"credentials":        "/credentials",
-				"regions":            "/regions",
-				"azureSubscriptions": "/azure/subscriptions",
+				"clusters":           "/api/clusters",
+				"cluster":            "/api/clusters/:id",
+				"cert":               "/api/clusters/:id/ca-cert",
+				"events":             "/api/events",
+				"prompt":             "/api/clusters/:id/prompts/:prompt_id",
+				"credentials":        "/api/credentials",
+				"regions":            "/api/regions",
+				"azureSubscriptions": "/api/azure/subscriptions",
 			},
 		},
 	}
@@ -77,25 +77,27 @@ func ServeHTTP() error {
 		}
 	}
 
-	httpRouter := httprouter.New()
+	router := httprouter.New()
 
-	httpRouter.GET("/", api.ServeTemplate)
-	httpRouter.GET("/credentials", api.ServeTemplate)
-	httpRouter.GET("/credentials/:id", api.ServeTemplate)
-	httpRouter.GET("/clusters/:id", api.ServeTemplate)
-	httpRouter.GET("/clusters/:id/ca-cert", api.GetCert)
-	httpRouter.GET("/clusters/:id/delete", api.ServeTemplate)
-	httpRouter.GET("/oauth/azure", api.ServeTemplate)
-	httpRouter.DELETE("/clusters/:id", api.DeleteCluster)
-	httpRouter.GET("/clusters", api.RedirectRoot)
-	httpRouter.POST("/clusters", api.LaunchCluster)
-	httpRouter.GET("/events", api.Events)
-	httpRouter.POST("/clusters/:id/prompts/:prompt_id", api.Prompt)
-	httpRouter.GET("/assets/*assetPath", api.ServeAsset)
-	httpRouter.POST("/credentials", api.NewCredential)
-	httpRouter.DELETE("/credentials/:type/:id", api.DeleteCredential)
-	httpRouter.GET("/regions", api.GetCloudRegions)
-	httpRouter.GET("/azure/subscriptions", api.GetAzureSubscriptions)
+	router.GET("/", api.ServeTemplate)
+	router.GET("/credentials", api.ServeTemplate)
+	router.GET("/credentials/:id", api.ServeTemplate)
+	router.GET("/clusters/:id", api.ServeTemplate)
+	router.GET("/clusters/:id/delete", api.ServeTemplate)
+	router.GET("/oauth/azure", api.ServeTemplate)
+	router.GET("/clusters", api.RedirectRoot)
+	router.GET("/assets/*assetPath", api.ServeAsset)
+
+	router.POST("/api/clusters", api.LaunchCluster)
+	router.GET("/api/clusters/:id", api.GetCluster)
+	router.GET("/api/clusters/:id/ca-cert", api.GetCert)
+	router.DELETE("/api/clusters/:id", api.DeleteCluster)
+	router.GET("/api/events", api.GetEvents)
+	router.POST("/api/clusters/:id/prompts/:prompt_id", api.RespondToPrompt)
+	router.POST("/api/credentials", api.NewCredential)
+	router.DELETE("/api/credentials/:type/:id", api.DeleteCredential)
+	router.GET("/api/regions", api.GetCloudRegions)
+	router.GET("/api/azure/subscriptions", api.GetAzureSubscriptions)
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -104,7 +106,7 @@ func ServeHTTP() error {
 	addr := fmt.Sprintf("http://localhost:%d", l.Addr().(*net.TCPAddr).Port)
 	fmt.Printf("Open %s in your browser to continue.\n", addr)
 	browser.OpenURL(addr)
-	return http.Serve(l, api.CorsHandler(httpRouter, addr))
+	return http.Serve(l, api.CorsHandler(router, addr))
 }
 
 func (api *httpAPI) CorsHandler(main http.Handler, addr string) http.Handler {
@@ -241,7 +243,7 @@ func (api *httpAPI) DeleteCluster(w http.ResponseWriter, req *http.Request, para
 	w.WriteHeader(200)
 }
 
-func (api *httpAPI) Events(w http.ResponseWriter, req *http.Request, params httprouter.Params) {
+func (api *httpAPI) GetEvents(w http.ResponseWriter, req *http.Request, params httprouter.Params) {
 	eventChan := make(chan *Event)
 	lastEventID := req.Header.Get("Last-Event-ID")
 	sub := api.Installer.Subscribe(eventChan, lastEventID)
@@ -249,7 +251,7 @@ func (api *httpAPI) Events(w http.ResponseWriter, req *http.Request, params http
 	sse.ServeStream(w, eventChan, api.logger)
 }
 
-func (api *httpAPI) Prompt(w http.ResponseWriter, req *http.Request, params httprouter.Params) {
+func (api *httpAPI) RespondToPrompt(w http.ResponseWriter, req *http.Request, params httprouter.Params) {
 	cluster, err := api.Installer.FindCluster(params.ByName("id"))
 	if err != nil {
 		httphelper.ObjectNotFoundError(w, "cluster not found")
@@ -391,17 +393,16 @@ func (api *httpAPI) ServeAsset(w http.ResponseWriter, req *http.Request, params 
 	}
 }
 
-func (api *httpAPI) ServeTemplate(w http.ResponseWriter, req *http.Request, params httprouter.Params) {
-	if req.Header.Get("Accept") == "application/json" {
-		s, err := api.Installer.FindBaseCluster(params.ByName("id"))
-		if err != nil {
-			httphelper.ObjectNotFoundError(w, err.Error())
-			return
-		}
-		httphelper.JSON(w, 200, s)
+func (api *httpAPI) GetCluster(w http.ResponseWriter, req *http.Request, params httprouter.Params) {
+	cluster, err := api.Installer.FindBaseCluster(params.ByName("id"))
+	if err != nil {
+		httphelper.ObjectNotFoundError(w, err.Error())
 		return
 	}
+	httphelper.JSON(w, 200, cluster)
+}
 
+func (api *httpAPI) ServeTemplate(w http.ResponseWriter, req *http.Request, params httprouter.Params) {
 	manifest, err := api.AssetManifest()
 	if err != nil {
 		httphelper.Error(w, err)
