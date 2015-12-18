@@ -134,8 +134,7 @@ func (i *Installer) GetEventsSince(eventID string) []*Event {
 			if !e.Timestamp.After(ts) {
 				continue
 			}
-			if e.Type == eventType {
-				i.processEvent(e)
+			if e.Type == eventType && i.processEvent(e) {
 				events = append(events, e)
 			}
 		}
@@ -157,8 +156,9 @@ func (i *Installer) GetEventsSince(eventID string) []*Event {
 		if isStringIn(e.Type, priority) {
 			continue
 		}
-		i.processEvent(e)
-		events = append(events, e)
+		if i.processEvent(e) {
+			events = append(events, e)
+		}
 	}
 
 	return events
