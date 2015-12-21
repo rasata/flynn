@@ -41,7 +41,7 @@ func (c *AWSCluster) FindCredentials() (aws.CredentialsProvider, error) {
 	if c.base.CredentialID == "aws_env" {
 		return aws.EnvCreds()
 	}
-	cred, err := c.base.FindCredentials()
+	cred, err := c.base.data.FindCredentials(c.base.CredentialID)
 	if err != nil {
 		return nil, err
 	}
@@ -94,10 +94,11 @@ func (c *AWSCluster) wrapRequest(runRequest func() error) error {
 	}
 }
 
+// TODO(jvatic): Move into Data method
 func (c *AWSCluster) saveField(field string, value interface{}) error {
-	c.base.installer.dbMtx.Lock()
-	defer c.base.installer.dbMtx.Unlock()
-	return c.base.installer.txExec(fmt.Sprintf(`
+	c.base.data.dbMtx.Lock()
+	defer c.base.data.dbMtx.Unlock()
+	return c.base.data.txExec(fmt.Sprintf(`
   UPDATE aws_clusters SET %s = $2 WHERE ClusterID == $1
   `, field), c.ClusterID, value)
 }
@@ -203,7 +204,7 @@ func (c *AWSCluster) Delete() {
 	if err := c.base.MarkDeleted(); err != nil {
 		c.base.SendError(err)
 	}
-	c.base.sendEvent(&Event{
+	c.base.MustSendEvent(&Event{
 		ClusterID:   c.base.ID,
 		Type:        "cluster_state",
 		Description: "deleted",

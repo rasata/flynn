@@ -528,7 +528,7 @@ func (c *SSHCluster) Delete() {
 	if err := c.base.MarkDeleted(); err != nil {
 		c.base.SendError(err)
 	}
-	c.base.sendEvent(&Event{
+	c.base.MustSendEvent(&Event{
 		ClusterID:   c.base.ID,
 		Type:        "cluster_state",
 		Description: "deleted",

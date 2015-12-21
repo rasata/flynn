@@ -14,11 +14,11 @@ import (
 	"github.com/flynn/flynn/pkg/sshkeygen"
 )
 
-func (i *Installer) azureClient(creds *Credential) *azure.Client {
+func (d *Data) AzureClient(creds *Credential) *azure.Client {
 	var azureJSONOAuthClient *http.Client
 	var azureXMLOAuthClient *http.Client
 	for _, oc := range creds.OAuthCreds {
-		ctx := context.WithValue(oauth2.NoContext, oauth2.TokenRefreshNotifier, i.azureTokenRefreshHandler(oc.ClientID, oc.Scope))
+		ctx := context.WithValue(oauth2.NoContext, oauth2.TokenRefreshNotifier, d.AzureTokenRefreshHandler(oc.ClientID, oc.Scope))
 		token := &oauth2.Token{
 			AccessToken:  oc.AccessToken,
 			RefreshToken: oc.RefreshToken,
@@ -34,8 +34,16 @@ func (i *Installer) azureClient(creds *Credential) *azure.Client {
 	return azure.NewClient(azureJSONOAuthClient, azureXMLOAuthClient)
 }
 
-func (i *Installer) updateAzureToken(clientID, scope string, token *oauth2.Token) error {
-	tx, err := i.db.Begin()
+func (d *Data) AzureTokenRefreshHandler(clientID, scope string) oauth2.TokenRefreshNotifierFunc {
+	return func(token *oauth2.Token) {
+		if err := d.UpdateAzureToken(clientID, scope, token); err != nil {
+			fmt.Println(err)
+		}
+	}
+}
+
+func (d *Data) UpdateAzureToken(clientID, scope string, token *oauth2.Token) error {
+	tx, err := d.db.Begin()
 	if err != nil {
 		return err
 	}
@@ -48,14 +56,6 @@ func (i *Installer) updateAzureToken(clientID, scope string, token *oauth2.Token
 		return err
 	}
 	return tx.Commit()
-}
-
-func (i *Installer) azureTokenRefreshHandler(clientID, scope string) oauth2.TokenRefreshNotifierFunc {
-	return func(token *oauth2.Token) {
-		if err := i.updateAzureToken(clientID, scope, token); err != nil {
-			fmt.Println(err)
-		}
-	}
 }
 
 func (c *AzureCluster) Type() string {
@@ -73,7 +73,7 @@ func (c *AzureCluster) SetBase(base *BaseCluster) {
 func (c *AzureCluster) SetCreds(creds *Credential) error {
 	c.base.credential = creds
 	c.base.CredentialID = creds.ID
-	c.client = c.base.installer.azureClient(creds)
+	c.client = c.base.data.AzureClient(creds)
 	return nil
 }
 
@@ -89,10 +89,11 @@ func (c *AzureCluster) SetDefaultsAndValidate() error {
 	return nil
 }
 
+// TODO(jvatic): Move into Data method
 func (c *AzureCluster) saveField(field string, value interface{}) error {
-	c.base.installer.dbMtx.Lock()
-	defer c.base.installer.dbMtx.Unlock()
-	return c.base.installer.txExec(fmt.Sprintf(`
+	c.base.data.dbMtx.Lock()
+	defer c.base.data.dbMtx.Unlock()
+	return c.base.data.txExec(fmt.Sprintf(`
   UPDATE azure_clusters SET %s = $2 WHERE ClusterID == $1
   `, field), c.ClusterID, value)
 }
@@ -295,7 +296,7 @@ func (c *AzureCluster) Delete() {
 	if err := c.base.MarkDeleted(); err != nil {
 		c.base.SendError(err)
 	}
-	c.base.sendEvent(&Event{
+	c.base.MustSendEvent(&Event{
 		ClusterID:   c.base.ID,
 		Type:        "cluster_state",
 		Description: "deleted",

@@ -11,6 +11,7 @@ import (
 	"github.com/flynn/flynn/Godeps/_workspace/src/github.com/cznic/ql"
 	"github.com/flynn/flynn/Godeps/_workspace/src/github.com/digitalocean/godo"
 	"github.com/flynn/flynn/Godeps/_workspace/src/golang.org/x/crypto/ssh"
+	log "github.com/flynn/flynn/Godeps/_workspace/src/gopkg.in/inconshreveable/log15.v2"
 	"github.com/flynn/flynn/pkg/azure"
 	"github.com/flynn/flynn/pkg/knownhosts"
 	"github.com/flynn/flynn/pkg/sshkeygen"
@@ -136,8 +137,8 @@ type BaseCluster struct {
 	DeletedAt           *time.Time        `json:"deleted_at,omitempty"`
 
 	credential        *Credential
-	installer         *Installer
-	pendingPrompt     *Prompt
+	data              *Data
+	logger            log.Logger
 	done              bool
 	passwordPromptMtx sync.Mutex
 	passwordCache     map[string]string
@@ -164,6 +165,7 @@ type Event struct {
 
 type Prompt struct {
 	ID        string     `json:"id"`
+	ClusterID string     `json:"cluster_ID"`
 	Type      string     `json:"type,omitempty"`
 	Message   string     `json:"message,omitempty"`
 	Yes       bool       `json:"yes,omitempty"`
@@ -174,12 +176,12 @@ type Prompt struct {
 	cluster   *BaseCluster
 }
 
-func (i *Installer) updatedbColumns(in interface{}, t string) error {
+func (d *Data) updatedbColumns(in interface{}, t string) error {
 	s, err := ql.StructSchema(in)
 	if err != nil {
 		return err
 	}
-	rows, err := i.db.Query(fmt.Sprintf("SELECT * FROM %s LIMIT 0", t))
+	rows, err := d.db.Query(fmt.Sprintf("SELECT * FROM %s LIMIT 0", t))
 	if err != nil {
 		return err
 	}
@@ -213,7 +215,7 @@ func (i *Installer) updatedbColumns(in interface{}, t string) error {
 		}
 	}
 
-	tx, err := i.db.Begin()
+	tx, err := d.db.Begin()
 	if err != nil {
 		return err
 	}
@@ -240,8 +242,8 @@ func (i *Installer) updatedbColumns(in interface{}, t string) error {
 }
 
 // Event PromptID -> ResourceType + ResourceID
-func (i *Installer) runMigration1() error {
-	rows, err := i.db.Query("SELECT * FROM events LIMIT 0")
+func (d *Data) runMigration1() error {
+	rows, err := d.db.Query("SELECT * FROM events LIMIT 0")
 	if err != nil {
 		return err
 	}
@@ -257,7 +259,7 @@ func (i *Installer) runMigration1() error {
 		}
 	}
 
-	tx, err := i.db.Begin()
+	tx, err := d.db.Begin()
 	if err != nil {
 		return err
 	}
@@ -285,8 +287,8 @@ func (i *Installer) runMigration1() error {
 }
 
 // Cleanup events for deleted clusters
-func (i *Installer) runMigration2() error {
-	tx, err := i.db.Begin()
+func (d *Data) runMigration2() error {
+	tx, err := d.db.Begin()
 	if err != nil {
 		return err
 	}
@@ -298,23 +300,57 @@ func (i *Installer) runMigration2() error {
 	return tx.Commit()
 }
 
-func (i *Installer) migrateDB() error {
-	schemaInterfaces := map[interface{}]string{
-		(*Credential)(nil):          "credentials",
-		(*OAuthCredential)(nil):     "oauth_credentials",
-		(*BaseCluster)(nil):         "clusters",
-		(*AWSCluster)(nil):          "aws_clusters",
-		(*DigitalOceanCluster)(nil): "digital_ocean_clusters",
-		(*DigitalOceanDroplet)(nil): "digital_ocean_droplets",
-		(*AzureCluster)(nil):        "azure_clusters",
-		(*SSHCluster)(nil):          "ssh_clusters",
-		(*Event)(nil):               "events",
-		(*Prompt)(nil):              "prompts",
-		(*InstanceIPs)(nil):         "instances",
-		(*Domain)(nil):              "domains",
+func (d *Data) MustTableName(item interface{}) string {
+	switch item.(type) {
+	case *Credential, Credential:
+		return "credentials"
+	case *OAuthCredential, OAuthCredential:
+		return "oauth_credentials"
+	case *BaseCluster, BaseCluster:
+		return "clusters"
+	case *AWSCluster, AWSCluster:
+		return "aws_clusters"
+	case *DigitalOceanCluster, DigitalOceanCluster:
+		return "digital_ocean_clusters"
+	case *DigitalOceanDroplet, DigitalOceanDroplet:
+		return "digital_ocean_droplets"
+	case *AzureCluster, AzureCluster:
+		return "azure_clusters"
+	case *SSHCluster, SSHCluster:
+		return "ssh_clusters"
+	case *Event, Event:
+		return "events"
+	case *Prompt, Prompt:
+		return "prompts"
+	case *InstanceIPs, InstanceIPs:
+		return "instances"
+	case *Domain, Domain:
+		return "domains"
+	}
+	panic(fmt.Errorf("Unknown table name for type %T", item))
+}
+
+func (d *Data) migrateDB() error {
+	typeExamples := []interface{}{
+		(*Credential)(nil),
+		(*OAuthCredential)(nil),
+		(*BaseCluster)(nil),
+		(*AWSCluster)(nil),
+		(*DigitalOceanCluster)(nil),
+		(*DigitalOceanDroplet)(nil),
+		(*AzureCluster)(nil),
+		(*SSHCluster)(nil),
+		(*Event)(nil),
+		(*Prompt)(nil),
+		(*InstanceIPs)(nil),
+		(*Domain)(nil),
+	}
+	schemaInterfaces := make(map[interface{}]string, len(typeExamples))
+	for _, ex := range typeExamples {
+		schemaInterfaces[ex] = d.MustTableName(ex)
 	}
 
-	tx, err := i.db.Begin()
+	tx, err := d.db.Begin()
 	if err != nil {
 		return err
 	}
@@ -332,21 +368,21 @@ func (i *Installer) migrateDB() error {
 		return err
 	}
 
-	if err := i.runMigration1(); err != nil {
+	if err := d.runMigration1(); err != nil {
 		return err
 	}
 
-	if err := i.runMigration2(); err != nil {
+	if err := d.runMigration2(); err != nil {
 		return err
 	}
 
 	for item, tableName := range schemaInterfaces {
-		if err := i.updatedbColumns(item, tableName); err != nil {
+		if err := d.updatedbColumns(item, tableName); err != nil {
 			return err
 		}
 	}
 
-	if err := i.txExec(`
+	if err := d.txExec(`
 		CREATE UNIQUE INDEX IF NOT EXISTS CredentialsIdx1 ON credentials (ID);
 		CREATE INDEX IF NOT EXISTS EventsIdx1 ON events (Type);
 		CREATE INDEX IF NOT EXISTS DomainsIdx1 ON domains (ClusterID);

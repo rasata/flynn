@@ -3,7 +3,6 @@ package installer
 import (
 	"bufio"
 	"bytes"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -20,13 +19,9 @@ import (
 	cfg "github.com/flynn/flynn/cli/config"
 )
 
-func (c *BaseCluster) FindCredentials() (*Credential, error) {
-	return c.installer.FindCredentials(c.CredentialID)
-}
-
 func (c *BaseCluster) HandleAuthenticationFailure(cluster Cluster, err error) bool {
 	credentialID := c.CredentialPrompt("Authentication failed, please select a new credential to continue")
-	credential, err := c.installer.FindCredentials(credentialID)
+	credential, err := c.data.FindCredentials(credentialID)
 	if err != nil {
 		c.SendError(fmt.Errorf("error finding credential with ID %s: %s", credentialID, err))
 		return false
@@ -35,11 +30,11 @@ func (c *BaseCluster) HandleAuthenticationFailure(cluster Cluster, err error) bo
 		c.SendError(fmt.Errorf("error setting credential: %s", err))
 		return false
 	}
-	if err := c.installer.SaveCluster(cluster); err != nil {
+	if err := c.data.PersistCluster(cluster); err != nil {
 		c.SendError(fmt.Errorf("error saving cluster: %s", err))
 		return false
 	}
-	c.installer.SendEvent(&Event{
+	c.data.SendEvent(&Event{
 		Type:      "cluster_update",
 		ClusterID: c.ID,
 	})
@@ -47,24 +42,24 @@ func (c *BaseCluster) HandleAuthenticationFailure(cluster Cluster, err error) bo
 }
 
 func (c *BaseCluster) saveField(field string, value interface{}) error {
-	c.installer.dbMtx.Lock()
-	defer c.installer.dbMtx.Unlock()
-	return c.installer.txExec(fmt.Sprintf("UPDATE clusters SET %s = $2 WHERE ID == $1", field), c.ID, value)
+	c.data.dbMtx.Lock()
+	defer c.data.dbMtx.Unlock()
+	return c.data.txExec(fmt.Sprintf("UPDATE clusters SET %s = $2 WHERE ID == $1", field), c.ID, value)
 }
 
 func (c *BaseCluster) saveDomain() error {
-	c.installer.dbMtx.Lock()
-	defer c.installer.dbMtx.Unlock()
-	return c.installer.txExec(`
+	c.data.dbMtx.Lock()
+	defer c.data.dbMtx.Unlock()
+	return c.data.txExec(`
   INSERT INTO domains (ClusterID, Name, Token) VALUES ($1, $2, $3);
   `, c.ID, c.Domain.Name, c.Domain.Token)
 }
 
 func (c *BaseCluster) saveInstanceIPs() error {
-	c.installer.dbMtx.Lock()
-	defer c.installer.dbMtx.Unlock()
+	c.data.dbMtx.Lock()
+	defer c.data.dbMtx.Unlock()
 
-	tx, err := c.installer.db.Begin()
+	tx, err := c.data.db.Begin()
 	if err != nil {
 		return err
 	}
@@ -81,17 +76,16 @@ func (c *BaseCluster) saveInstanceIPs() error {
 func (c *BaseCluster) setState(state string) {
 	c.State = state
 	if err := c.saveField("State", state); err != nil {
-		c.installer.logger.Debug(fmt.Sprintf("Error saving cluster State: %s", err.Error()))
+		c.logger.Debug(fmt.Sprintf("Error saving cluster State: %s", err.Error()))
 	}
 	if c.State == "running" {
-		if err := c.installer.txExec(`
+		if err := c.data.txExec(`
 			UPDATE events SET DeletedAt = now() WHERE Type == "log" AND ClusterID == $1;
 		`, c.ID); err != nil {
-			c.installer.logger.Debug(fmt.Sprintf("Error updating events: %s", err.Error()))
+			c.logger.Debug(fmt.Sprintf("Error updating events: %s", err.Error()))
 		}
-		c.installer.removeClusterLogEvents(c.ID)
 	}
-	c.sendEvent(&Event{
+	c.MustSendEvent(&Event{
 		ClusterID:   c.ID,
 		Type:        "cluster_state",
 		Description: state,
@@ -99,63 +93,7 @@ func (c *BaseCluster) setState(state string) {
 }
 
 func (c *BaseCluster) MarkDeleted() (err error) {
-	c.installer.dbMtx.Lock()
-	defer c.installer.dbMtx.Unlock()
-
-	var tx *sql.Tx
-	tx, err = c.installer.db.Begin()
-	if err != nil {
-		return
-	}
-
-	if _, err = tx.Exec(`UPDATE prompts SET DeletedAt = now() WHERE ID IN (SELECT ResourceID FROM events WHERE ClusterID == $1 AND ResourceType == "prompt")`, c.ID); err != nil {
-		tx.Rollback()
-		return
-	}
-
-	if _, err = tx.Exec(`UPDATE events SET DeletedAt = now() WHERE ClusterID == $1`, c.ID); err != nil {
-		tx.Rollback()
-		return
-	}
-
-	if _, err = tx.Exec(`UPDATE domains SET DeletedAt = now() WHERE ClusterID == $1`, c.ID); err != nil {
-		tx.Rollback()
-		return
-	}
-
-	if _, err = tx.Exec(`UPDATE instances SET DeletedAt = now() WHERE ClusterID == $1`, c.ID); err != nil {
-		tx.Rollback()
-		return
-	}
-
-	if _, err = tx.Exec(`UPDATE clusters SET DeletedAt = now() WHERE ID == $1`, c.ID); err != nil {
-		tx.Rollback()
-		return
-	}
-
-	if _, err = tx.Exec(`UPDATE aws_clusters SET DeletedAt = now() WHERE ClusterID == $1`, c.ID); err != nil {
-		tx.Rollback()
-		return
-	}
-
-	if _, err = tx.Exec(`UPDATE digital_ocean_clusters SET DeletedAt = now() WHERE ClusterID == $1`, c.ID); err != nil {
-		tx.Rollback()
-		return
-	}
-
-	if _, err = tx.Exec(`UPDATE digital_ocean_droplets SET DeletedAt = now() WHERE ClusterID == $1`, c.ID); err != nil {
-		tx.Rollback()
-		return
-	}
-
-	if _, err = tx.Exec(`UPDATE ssh_clusters SET DeletedAt = now() WHERE ClusterID == $1`, c.ID); err != nil {
-		tx.Rollback()
-		return
-	}
-
-	c.installer.ClusterDeleted(c.ID)
-	err = tx.Commit()
-	return
+	return c.data.DeleteCluster(c.ID)
 }
 
 func (c *BaseCluster) SetDefaultsAndValidate() error {

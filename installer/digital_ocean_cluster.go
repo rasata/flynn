@@ -50,18 +50,20 @@ func (c *DigitalOceanCluster) SetDefaultsAndValidate() error {
 	return nil
 }
 
+// TODO(jvatic): Move into Data method
 func (c *DigitalOceanCluster) saveField(field string, value interface{}) error {
-	c.base.installer.dbMtx.Lock()
-	defer c.base.installer.dbMtx.Unlock()
-	return c.base.installer.txExec(fmt.Sprintf(`
+	c.base.data.dbMtx.Lock()
+	defer c.base.data.dbMtx.Unlock()
+	return c.base.data.txExec(fmt.Sprintf(`
   UPDATE digital_ocean_clusters SET %s = $2 WHERE ClusterID == $1
   `, field), c.ClusterID, value)
 }
 
+// TODO(jvatic): Move into Data method
 func (c *DigitalOceanCluster) saveDropletIDs() error {
-	c.base.installer.dbMtx.Lock()
-	defer c.base.installer.dbMtx.Unlock()
-	tx, err := c.base.installer.db.Begin()
+	c.base.data.dbMtx.Lock()
+	defer c.base.data.dbMtx.Unlock()
+	tx, err := c.base.data.db.Begin()
 	if err != nil {
 		return err
 	}
@@ -491,7 +493,7 @@ func (c *DigitalOceanCluster) Delete() {
 	if err := c.base.MarkDeleted(); err != nil {
 		c.base.SendError(err)
 	}
-	c.base.sendEvent(&Event{
+	c.base.MustSendEvent(&Event{
 		ClusterID:   c.base.ID,
 		Type:        "cluster_state",
 		Description: "deleted",

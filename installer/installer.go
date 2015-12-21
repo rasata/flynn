@@ -1,126 +1,70 @@
 package installer
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
-	"sync"
 
 	"github.com/flynn/flynn/Godeps/_workspace/src/github.com/digitalocean/godo"
 	log "github.com/flynn/flynn/Godeps/_workspace/src/gopkg.in/inconshreveable/log15.v2"
+	"github.com/flynn/flynn/pkg/azure"
 	"github.com/flynn/flynn/pkg/httphelper"
 )
 
 var ClusterNotFoundError = errors.New("Cluster not found")
 
 type Installer struct {
-	db            *sql.DB
-	events        []*Event
-	subscriptions []*Subscription
-	clusters      []Cluster
-	logger        log.Logger
+	logger log.Logger
 
-	dbMtx        sync.RWMutex
-	eventsMtx    sync.Mutex
-	subscribeMtx sync.Mutex
-	clustersMtx  sync.RWMutex
+	Data *Data
 }
 
 func NewInstaller(l log.Logger) *Installer {
 	installer := &Installer{
-		subscriptions: make([]*Subscription, 0),
-		clusters:      make([]Cluster, 0),
-		logger:        l,
+		logger: l,
 	}
-	if err := installer.openDB(); err != nil {
+	data, err := InitData(l)
+	if err != nil {
 		panic(err)
 	}
-	if err := installer.loadEventsFromDB(); err != nil {
-		panic(err)
-	}
+	installer.Data = data
 	return installer
 }
 
-func (i *Installer) loadEventsFromDB() error {
-	var events []*Event
-	rows, err := i.db.Query(`
-    SELECT ID, Timestamp, Type, ClusterID, ResourceType, ResourceID, Description FROM events WHERE DeletedAt IS NULL ORDER BY Timestamp
-  `)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		e := &Event{}
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Type, &e.ClusterID, &e.ResourceType, &e.ResourceID, &e.Description); err != nil {
-			return err
-		}
-		events = append(events, e)
-	}
-	i.events = events
-	return nil
+func (i *Installer) SubscribeEvents(eventChan chan *Event, lastEventID string) *Subscription {
+	return i.Data.SubscribeEvents(eventChan, lastEventID)
 }
 
-func (i *Installer) removeClusterEvents(clusterID string) {
-	i.eventsMtx.Lock()
-	defer i.eventsMtx.Unlock()
-	events := make([]*Event, 0, len(i.events))
-	for _, e := range i.events {
-		if e.ClusterID == "" || e.ClusterID != clusterID {
-			events = append(events, e)
-		}
-	}
-	i.events = events
+func (i *Installer) UnsubscribeEvents(sub *Subscription) {
+	i.Data.UnsubscribeEvents(sub)
 }
 
-func (i *Installer) removeClusterLogEvents(clusterID string) {
-	i.eventsMtx.Lock()
-	defer i.eventsMtx.Unlock()
-	events := make([]*Event, 0, len(i.events))
-	for _, e := range i.events {
-		if e.Type != "log" || e.ClusterID != clusterID {
-			events = append(events, e)
-		}
-	}
-	i.events = events
+func (i *Installer) FindBaseCluster(clusterID string) (*BaseCluster, error) {
+	return i.Data.FindBaseCluster(clusterID)
 }
 
-func (i *Installer) removeCredentialEvents(credID string) {
-	i.eventsMtx.Lock()
-	defer i.eventsMtx.Unlock()
-	events := make([]*Event, 0, len(i.events))
-	for _, e := range i.events {
-		if e.ResourceType != "credential" || e.ResourceID != credID {
-			events = append(events, e)
-		}
-	}
-	i.events = events
+func (i *Installer) FindCredentials(credentialID string) (*Credential, error) {
+	return i.Data.FindCredentials(credentialID)
 }
 
-func (i *Installer) txExec(query string, args ...interface{}) error {
-	tx, err := i.db.Begin()
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(query, args...)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+func (i *Installer) FetchPrompt(clusterID, promptID string) (*Prompt, error) {
+	return i.Data.FetchPrompt(clusterID, promptID)
+}
+
+func (i *Installer) AzureClient(creds *Credential) *azure.Client {
+	return i.Data.AzureClient(creds)
 }
 
 var credentialExistsError = errors.New("Credential already exists")
 
 func (i *Installer) SaveCredentials(creds *Credential) error {
-	i.dbMtx.Lock()
-	defer i.dbMtx.Unlock()
+	i.Data.dbMtx.Lock()
+	defer i.Data.dbMtx.Unlock()
 	if _, err := i.FindCredentials(creds.ID); err == nil {
 		return credentialExistsError
 	}
-	tx, err := i.db.Begin()
+	tx, err := i.Data.db.Begin()
 	if err != nil {
 		return err
 	}
@@ -138,7 +82,6 @@ func (i *Installer) SaveCredentials(creds *Credential) error {
 				tx.Rollback()
 				return err
 			}
-			i.removeCredentialEvents(creds.ID)
 		} else {
 			tx.Rollback()
 			return err
@@ -157,7 +100,7 @@ func (i *Installer) SaveCredentials(creds *Credential) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	go i.SendEvent(&Event{
+	go i.Data.MustSendEvent(&Event{
 		Type:         "new_credential",
 		ResourceType: "credential",
 		ResourceID:   creds.ID,
@@ -171,7 +114,7 @@ func (i *Installer) DeleteCredentials(id string) error {
 		return err
 	}
 	var count int64
-	if err := i.db.QueryRow(`SELECT count() FROM clusters WHERE CredentialID == $1 AND DeletedAt IS NULL`, id).Scan(&count); err != nil {
+	if err := i.Data.db.QueryRow(`SELECT count() FROM clusters WHERE CredentialID == $1 AND DeletedAt IS NULL`, id).Scan(&count); err != nil {
 		return err
 	}
 	if count > 0 {
@@ -180,17 +123,16 @@ func (i *Installer) DeleteCredentials(id string) error {
 			Message: "Credential is currently being used by one or more clusters",
 		}
 	}
-	if err := i.txExec(`UPDATE credentials SET DeletedAt = now() WHERE ID == $1`, id); err != nil {
+	if err := i.Data.txExec(`UPDATE credentials SET DeletedAt = now() WHERE ID == $1`, id); err != nil {
 		return err
 	}
-	if err := i.txExec(`UPDATE oauth_credentials SET DeletedAt = now() WHERE ClientID == $1`, id); err != nil {
+	if err := i.Data.txExec(`UPDATE oauth_credentials SET DeletedAt = now() WHERE ClientID == $1`, id); err != nil {
 		return err
 	}
-	if err := i.txExec(`UPDATE events SET DeletedAt = now() WHERE ResourceType == "credential" AND ResourceID == $1`, id); err != nil {
+	if err := i.Data.txExec(`UPDATE events SET DeletedAt = now() WHERE ResourceType == "credential" AND ResourceID == $1`, id); err != nil {
 		return err
 	}
-	i.removeCredentialEvents(id)
-	go i.SendEvent(&Event{
+	go i.Data.MustSendEvent(&Event{
 		Type:         "delete_credential",
 		ResourceType: "credential",
 		ResourceID:   id,
@@ -198,52 +140,18 @@ func (i *Installer) DeleteCredentials(id string) error {
 	return nil
 }
 
-func (i *Installer) FindCredentials(id string) (*Credential, error) {
-	creds := &Credential{}
-	var endpoint *string
-	if err := i.db.QueryRow(`SELECT ID, Secret, Name, Type, Endpoint FROM credentials WHERE ID == $1 AND DeletedAt IS NULL LIMIT 1`, id).Scan(&creds.ID, &creds.Secret, &creds.Name, &creds.Type, &endpoint); err != nil {
-		return nil, err
-	}
-	if endpoint != nil {
-		creds.Endpoint = *endpoint
-	}
-	if creds.Type == "azure" {
-		oauthCreds := make([]*OAuthCredential, 0, 2)
-		rows, err := i.db.Query(`SELECT AccessToken, RefreshToken, ExpiresAt, Scope FROM oauth_credentials WHERE ClientID == $1`, creds.ID)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			oc := &OAuthCredential{ClientID: creds.ID}
-			if err := rows.Scan(&oc.AccessToken, &oc.RefreshToken, &oc.ExpiresAt, &oc.Scope); err != nil {
-				return nil, err
-			}
-			oauthCreds = append(oauthCreds, oc)
-		}
-		if err := rows.Err(); err != nil {
-			return nil, err
-		}
-		creds.OAuthCreds = oauthCreds
-	}
-	return creds, nil
-}
-
 func (i *Installer) LaunchCluster(c Cluster) error {
 	if err := c.SetDefaultsAndValidate(); err != nil {
 		return err
 	}
 
-	if err := i.SaveCluster(c); err != nil {
+	if err := i.Data.PersistCluster(c); err != nil {
 		return err
 	}
 
 	base := c.Base()
 
-	i.clustersMtx.Lock()
-	i.clusters = append(i.clusters, c)
-	i.clustersMtx.Unlock()
-	i.SendEvent(&Event{
+	i.Data.MustSendEvent(&Event{
 		Type:      "new_cluster",
 		Cluster:   base,
 		ClusterID: base.ID,
@@ -279,7 +187,7 @@ func (i *Installer) ListAzureRegions(creds *Credential) (interface{}, error) {
 		Name string `json:"name"`
 		Slug string `json:"slug"`
 	}
-	client := i.azureClient(creds)
+	client := i.AzureClient(creds)
 	res, err := client.ListLocations("Microsoft.Compute", "virtualMachines")
 	if err != nil {
 		return nil, err
@@ -294,158 +202,9 @@ func (i *Installer) ListAzureRegions(creds *Credential) (interface{}, error) {
 	return locs, nil
 }
 
-func (i *Installer) dbMarshalItem(tableName string, item interface{}) ([]interface{}, error) {
-	rows, err := i.db.Query(fmt.Sprintf("SELECT * FROM %s LIMIT 0", tableName))
-	if err != nil {
-		return nil, err
-	}
-	cols, err := rows.Columns()
-	if err != nil {
-		return nil, err
-	}
-
-	v := reflect.Indirect(reflect.ValueOf(item))
-	fields := make([]interface{}, len(cols))
-	for idx, c := range cols {
-		fields[idx] = v.FieldByName(c).Interface()
-	}
-	return fields, nil
-}
-
-func (i *Installer) SaveCluster(c Cluster) error {
-	i.dbMtx.Lock()
-	defer i.dbMtx.Unlock()
-
-	base := c.Base()
-
-	base.Type = c.Type()
-	base.Name = base.ID
-
-	baseFields, err := i.dbMarshalItem("clusters", base)
-	if err != nil {
-		return err
-	}
-	baseVStr := make([]string, 0, len(baseFields))
-	for idx := range baseFields {
-		baseVStr = append(baseVStr, fmt.Sprintf("$%d", idx+1))
-	}
-
-	tableName := strings.Join([]string{base.Type, "clusters"}, "_")
-	clusterFields, err := i.dbMarshalItem(tableName, c)
-	if err != nil {
-		return err
-	}
-	clusterVStr := make([]string, 0, len(clusterFields))
-	for idx := range clusterFields {
-		clusterVStr = append(clusterVStr, fmt.Sprintf("$%d", idx+1))
-	}
-
-	if err != nil {
-		return err
-	}
-	tx, err := i.db.Begin()
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(fmt.Sprintf("INSERT INTO clusters VALUES (%s)", strings.Join(baseVStr, ",")), baseFields...); err != nil {
-		tx.Rollback()
-		return err
-	}
-	if _, err := tx.Exec(fmt.Sprintf("INSERT INTO %s VALUES (%s)", tableName, strings.Join(clusterVStr, ",")), clusterFields...); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
-}
-
-func (i *Installer) FindBaseCluster(id string) (*BaseCluster, error) {
-	i.clustersMtx.RLock()
-	for _, c := range i.clusters {
-		base := c.Base()
-		if base.ID == id {
-			i.clustersMtx.RUnlock()
-			return base, nil
-		}
-	}
-	i.clustersMtx.RUnlock()
-
-	c := &BaseCluster{ID: id, installer: i}
-
-	err := i.db.QueryRow(`
-	SELECT CredentialID, Type, State, NumInstances, ControllerKey, ControllerPin, DashboardLoginToken, CACert, SSHKeyName, DiscoveryToken FROM clusters WHERE ID == $1 AND DeletedAt IS NULL LIMIT 1
-  `, c.ID).Scan(&c.CredentialID, &c.Type, &c.State, &c.NumInstances, &c.ControllerKey, &c.ControllerPin, &c.DashboardLoginToken, &c.CACert, &c.SSHKeyName, &c.DiscoveryToken)
-	if err != nil {
-		return nil, err
-	}
-
-	domain := &Domain{ClusterID: c.ID}
-	err = i.db.QueryRow(`
-  SELECT Name, Token FROM domains WHERE ClusterID == $1 AND DeletedAt IS NULL LIMIT 1
-  `, c.ID).Scan(&domain.Name, &domain.Token)
-	if err != nil && err != sql.ErrNoRows {
-		return nil, err
-	}
-	if err == nil {
-		c.Domain = domain
-	}
-
-	var instanceIPs []string
-	rows, err := i.db.Query(`SELECT IP FROM instances WHERE ClusterID == $1 AND DeletedAt IS NULL`, c.ID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var ip string
-		err = rows.Scan(&ip)
-		if err != nil {
-			return nil, err
-		}
-	}
-	c.InstanceIPs = instanceIPs
-
-	if c.Type != "ssh" {
-		credential, err := c.FindCredentials()
-		if err != nil {
-			return nil, err
-		}
-		c.credential = credential
-	}
-
-	return c, nil
-}
-
-func (i *Installer) findCachedCluster(id string) (Cluster, error) {
-	i.clustersMtx.RLock()
-	for _, c := range i.clusters {
-		if c.Base().ID == id {
-			i.clustersMtx.RUnlock()
-			return c, nil
-		}
-	}
-	i.clustersMtx.RUnlock()
-	return nil, fmt.Errorf("cluster not found")
-}
-
-func (i *Installer) cacheCluster(c Cluster) {
-	i.clustersMtx.Lock()
-	defer i.clustersMtx.Unlock()
-	i.clusters = append(i.clusters, c)
-}
-
 func (i *Installer) FindCluster(id string) (cluster Cluster, err error) {
-	if c, err := i.findCachedCluster(id); err == nil {
-		return c, nil
-	}
-
-	defer func() {
-		if err == nil {
-			i.cacheCluster(cluster)
-		}
-	}()
-
 	base := &BaseCluster{}
-	if err := i.db.QueryRow(`SELECT Type FROM clusters WHERE ID == $1 AND DeletedAt IS NULL`, id).Scan(&base.Type); err != nil {
+	if err := i.Data.db.QueryRow(`SELECT Type FROM clusters WHERE ID == $1 AND DeletedAt IS NULL`, id).Scan(&base.Type); err != nil {
 		return nil, err
 	}
 
@@ -474,11 +233,11 @@ func (i *Installer) FindDigitalOceanCluster(id string) (*DigitalOceanCluster, er
 		base:      base,
 	}
 
-	if err := i.db.QueryRow(`SELECT Region, Size, KeyFingerprint FROM digital_ocean_clusters WHERE ClusterID == $1 AND DeletedAt IS NULL LIMIT 1`, base.ID).Scan(&cluster.Region, &cluster.Size, &cluster.KeyFingerprint); err != nil {
+	if err := i.Data.db.QueryRow(`SELECT Region, Size, KeyFingerprint FROM digital_ocean_clusters WHERE ClusterID == $1 AND DeletedAt IS NULL LIMIT 1`, base.ID).Scan(&cluster.Region, &cluster.Size, &cluster.KeyFingerprint); err != nil {
 		return nil, err
 	}
 
-	rows, err := i.db.Query(`SELECT ID FROM digital_ocean_droplets WHERE ClusterID == $1 AND DeletedAt IS NULL`, base.ID)
+	rows, err := i.Data.db.Query(`SELECT ID FROM digital_ocean_droplets WHERE ClusterID == $1 AND DeletedAt IS NULL`, base.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -509,7 +268,7 @@ func (i *Installer) FindAzureCluster(id string) (*AzureCluster, error) {
 		base:      base,
 	}
 
-	if err := i.db.QueryRow(`SELECT SubscriptionID, Region, Size FROM azure_clusters WHERE ClusterID == $1 AND DeletedAt IS NULL LIMIT 1`, cluster.ClusterID).Scan(&cluster.SubscriptionID, &cluster.Region, &cluster.Size); err != nil {
+	if err := i.Data.db.QueryRow(`SELECT SubscriptionID, Region, Size FROM azure_clusters WHERE ClusterID == $1 AND DeletedAt IS NULL LIMIT 1`, cluster.ClusterID).Scan(&cluster.SubscriptionID, &cluster.Region, &cluster.Size); err != nil {
 		return nil, err
 	}
 
@@ -529,7 +288,7 @@ func (i *Installer) FindSSHCluster(id string) (*SSHCluster, error) {
 		base:      base,
 	}
 
-	if err := i.db.QueryRow(`SELECT SSHLogin, TargetsJSON FROM ssh_clusters WHERE ClusterID == $1 AND DeletedAt IS NULL LIMIT 1`, cluster.ClusterID).Scan(&cluster.SSHLogin, &cluster.TargetsJSON); err != nil {
+	if err := i.Data.db.QueryRow(`SELECT SSHLogin, TargetsJSON FROM ssh_clusters WHERE ClusterID == $1 AND DeletedAt IS NULL LIMIT 1`, cluster.ClusterID).Scan(&cluster.SSHLogin, &cluster.TargetsJSON); err != nil {
 		return nil, err
 	}
 
@@ -550,7 +309,7 @@ func (i *Installer) FindAWSCluster(id string) (*AWSCluster, error) {
 		base: cluster,
 	}
 
-	err = i.db.QueryRow(`
+	err = i.Data.db.QueryRow(`
 	SELECT StackID, StackName, ImageID, Region, InstanceType, VpcCIDR, SubnetCIDR, DNSZoneID FROM aws_clusters WHERE ClusterID == $1 AND DeletedAt IS NULL LIMIT 1
   `, cluster.ID).Scan(&awsCluster.StackID, &awsCluster.StackName, &awsCluster.ImageID, &awsCluster.Region, &awsCluster.InstanceType, &awsCluster.VpcCIDR, &awsCluster.SubnetCIDR, &awsCluster.DNSZoneID)
 	if err != nil {
@@ -573,17 +332,4 @@ func (i *Installer) DeleteCluster(id string) error {
 	}
 	go cluster.Delete()
 	return nil
-}
-
-func (i *Installer) ClusterDeleted(id string) {
-	i.clustersMtx.Lock()
-	defer i.clustersMtx.Unlock()
-	clusters := make([]Cluster, 0, len(i.clusters))
-	for _, c := range i.clusters {
-		if c.Base().ID != id {
-			clusters = append(clusters, c)
-		}
-	}
-	i.clusters = clusters
-	i.removeClusterEvents(id)
 }
